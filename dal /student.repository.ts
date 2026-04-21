@@ -9,40 +9,44 @@ type StudentInsert = Database['public']['Tables']['students']['Insert'];
 type StudentUpdate = Database['public']['Tables']['students']['Update'];
 // -- schema
 const StudentInsertSchema = z.object({
-  // Required /non-nullable
+  // Required / non-nullable
   user_id: z.string().uuid(),
   admission_number: z.string().min(3).max(50),
-  date_of_birth: z.coerce.date(),
+  date_of_birth: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Must be in format YYYY-MM-DD"),
   school_id: z.string().uuid(),
 
-  //Optional/nullable
-  gender: z.enum([
-    'male', 'female', 'other', 'prefer_not_to_say',
+  // Optional / nullable
+  gender: z
+    .enum(["male", "female", "other", "prefer_not_to_say"])
+    .nullable()
+    .optional(),
 
-  ]).nullable().optional(),
   current_class_id: z.string().uuid().nullable().optional(),
 
-  enrollment_status: z.enum([
-    'active', 'graduated', 'transferred_out',
-    'suspended', 'expelled', 'on_leave',
-  ]).nullable().optional(),
+  enrollment_status: z
+    .enum([
+      "active",
+      "graduated",
+      "transferred_out",
+      "suspended",
+      "expelled",
+      "on_leave",
+    ])
+    .default("active"),
 
-  enrollement_date: z.coerce.date().nullable().optional(),
-  graduation_date: z.coerce.date().nullable().optional(),
-  transfer_date: z.coerce.date().nullable().optional(),
+  enrollment_date: z.string().nullable().optional(),
+  graduation_date: z.string().nullable().optional(),
+  transfer_date: z.string().nullable().optional(),
 
   parent_verified: z.boolean().nullable().optional(),
-  sis_verified: z.boolean().nullable().optional(),
   requires_parental_consent: z.boolean().nullable().optional(),
   parental_consent_given: z.boolean().nullable().optional(),
-  parental_consent_date: z.coerce.date().nullable().optional(),
-
-  sis_student_id: z.string().nullable().optional(),
-  sis_last_synced_at: z.coerce.date().nullable().optional(),
+  parental_consent_date: z.string().nullable().optional(),
 
   privacy_settings: JsonSchema.nullable().optional(),
-
-});
+})
 
 const StudentUpdateSchema = StudentInsertSchema
   .omit({user_id: true, school_id: true,})
@@ -225,42 +229,38 @@ export class StudentsRepository extends BaseRepository<"students"> {
 
     if (error) this.handleDbError(error, "delete")
   }
-  async graduate(id: string, graduationDate: Date): Promise<StudentRow> {
-    this.log("info", "graduate", { id })
+  async graduate(id: string, graduationDate: string): Promise<StudentRow> {
+    this.log('info', 'graduate', { id })
     return this.update(id, {
-      enrollment_status: "graduated",
-      graduation_date: graduationDate,
+      enrollment_status: 'graduated',
+      graduation_date:   graduationDate,  // e.g. '2025-06-30'
     })
   }
-  async transfer(id: string, transferDate: Date): Promise<StudentRow> {
-    this.log("info", "transfer", { id })
+
+  async transfer(id: string, transferDate: string): Promise<StudentRow> {
+    this.log('info', 'transfer', { id })
     return this.update(id, {
-      enrollment_status: "transferred_out",
-      transfer_date: transferDate,
+      enrollment_status: 'transferred_out',
+      transfer_date:     transferDate,
     })
   }
+
   async suspend(id: string): Promise<StudentRow> {
-    this.log("info", "suspend", { id })
-    return this.update(id, { enrollment_status: "suspended" })
+    this.log('info', 'suspend', { id })
+    return this.update(id, { enrollment_status: 'suspended' })
   }
+
   async reinstate(id: string): Promise<StudentRow> {
-    this.log("info", "reinstate", { id })
-    return this.update(id, { enrollment_status: "active" })
+    this.log('info', 'reinstate', { id })
+    return this.update(id, { enrollment_status: 'active' })
   }
+
   async recordParentalConsent(id: string, given: boolean): Promise<StudentRow> {
-    this.log("info", "recordParentalConsent", { id, given })
+    this.log('info', 'recordParentalConsent', { id, given })
     return this.update(id, {
       parental_consent_given: given,
-      parental_consent_date: new Date(),
+      parental_consent_date:  new Date().toISOString().split('T')[0],  // 'YYYY-MM-DD'
     })
-  }
-  async assignToClass(id: string, classId: string): Promise<StudentRow> {
-    this.log("info", "assignToClass", { id, classId })
-    return this.update(id, { current_class_id: classId })
-  }
-  async removeFromClass(id: string): Promise<StudentRow> {
-    this.log("info", "removeFromClass", { id })
-    return this.update(id, { current_class_id: null })
   }
 }
 
