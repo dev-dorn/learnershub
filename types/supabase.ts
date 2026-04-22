@@ -12,31 +12,6 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.4"
   }
-  graphql_public: {
-    Tables: {
-      [_ in never]: never
-    }
-    Views: {
-      [_ in never]: never
-    }
-    Functions: {
-      graphql: {
-        Args: {
-          extensions?: Json
-          operationName?: string
-          query?: string
-          variables?: Json
-        }
-        Returns: Json
-      }
-    }
-    Enums: {
-      [_ in never]: never
-    }
-    CompositeTypes: {
-      [_ in never]: never
-    }
-  }
   public: {
     Tables: {
       achievements: {
@@ -1962,6 +1937,40 @@ export type Database = {
     }
     Functions: {
       check_account_health: { Args: { p_user_id: string }; Returns: Json }
+      get_class_daily_attendance_summary: {
+        Args: {
+          p_class_id: string
+          p_date: string
+          p_school_id: string
+          p_session_type: string
+        }
+        Returns: {
+          absent: number
+          attendance_rate: number
+          excused: number
+          late: number
+          present: number
+          total: number
+        }[]
+      }
+      get_student_attendance_summary: {
+        Args: {
+          p_class_id: string
+          p_date_from: string
+          p_date_to: string
+          p_school_id: string
+          p_student_id: string
+        }
+        Returns: {
+          absent: number
+          attendance_rate: number
+          excused: number
+          holiday: number
+          late: number
+          present: number
+          total: number
+        }[]
+      }
       get_user_permissions: { Args: { p_user_id: string }; Returns: Json }
       handle_successful_login: {
         Args: {
@@ -2100,9 +2109,6 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
-  graphql_public: {
-    Enums: {},
-  },
   public: {
     Enums: {},
   },
