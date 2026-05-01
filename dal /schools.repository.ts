@@ -1,48 +1,44 @@
 // src/dal/schools.repository.ts
 import { SupabaseClient, PostgrestError } from "@supabase/supabase-js"
 import { Database, Json } from "@/types/supabase"
-import { z } from "zod"
-import {
-  DALError,
-  NotFoundError,
-  ValidationError,
-  ConflictError,
-  DatabaseError,
-} from "./errors"
+import { DALError, NotFoundError, ConflictError, DatabaseError } from "./errors"
 import { logger } from "@/lib/logger"
 
 // ── Types ─────────────────────────────────────────────────────────────
 
 type SchoolRow = Database["public"]["Tables"]["schools"]["Row"]
 type SchoolInsert = Database["public"]["Tables"]["schools"]["Insert"]
-type SchoolUpdate = Database["public"]["Tables"]["schools"]["Update"]
 
-// ── Schemas ───────────────────────────────────────────────────────────
+// ── Internal input types ──────────────────────────────────────────────
 
-const SchoolCreateSchema = z.object({
+export interface InternalSchoolInput {
   // Required
-  name: z.string().min(2).max(150),
-  code: z
-    .string()
-    .min(3)
-    .max(20)
-    .regex(/^[A-Z0-9-]+$/, "Code must be uppercase alphanumeric with hyphens"),
+  name: string // 2–150 chars, validated upstream
+  code: string // 3–20 chars, uppercase alphanumeric + hyphens, validated upstream
 
   // Optional
-  address: z.string().max(300).optional(),
-  email: z.string().email().optional(),
-  phone: z.string().optional(),
-  timezone: z.string().default("Africa/Nairobi"),
-  logo_url: z.string().url().optional(),
-  is_active: z.boolean().default(true),
-})
+  address?: string | null
+  email?: string | null
+  phone?: string | null
+  timezone?: string // defaults to "Africa/Nairobi" upstream
+  logo_url?: string | null
+  is_active?: boolean // defaults to true upstream
+}
 
-const SchoolUpdateSchema = SchoolCreateSchema.partial()
+// Narrow update types per operation domain
 
-// ── Exported input types ──────────────────────────────────────────────
+export interface InternalSchoolUpdate {
+  name?: string
+  address?: string | null
+  email?: string | null
+  phone?: string | null
+  timezone?: string
+  logo_url?: string | null
+}
 
-export type CreateSchoolInput = z.infer<typeof SchoolCreateSchema>
-export type UpdateSchoolInput = z.infer<typeof SchoolUpdateSchema>
+export interface InternalSchoolBrandingUpdate {
+  logo_url: string | null
+}
 
 // ── List options ──────────────────────────────────────────────────────
 
@@ -53,7 +49,7 @@ export interface ListSchoolsOptions {
   offset?: number
 }
 
-// ── Pagination result ─────────────────────────────────────────────────
+// ── Result types ──────────────────────────────────────────────────────
 
 export interface PaginatedSchools {
   data: SchoolRow[]
@@ -63,7 +59,7 @@ export interface PaginatedSchools {
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-// SAFE_COLS — for public/general views, excludes large JSON blobs
+// SAFE_COLS — general views, excludes large JSON blobs
 const SAFE_COLS = [
   "id",
   "name",
@@ -78,7 +74,7 @@ const SAFE_COLS = [
   "updated_at",
 ].join(", ")
 
-// ADMIN_COLS — for admin views, includes settings and academic calendar
+// ADMIN_COLS — admin views, includes settings and academic calendar
 const ADMIN_COLS = `${SAFE_COLS}, settings, academic_calendar`
 
 const DEFAULT_LIMIT = 20
@@ -184,9 +180,7 @@ export class SchoolsRepository {
       .order("created_at", { ascending: false })
 
     if (isActive !== undefined) q = q.eq("is_active", isActive)
-    if (search) {
-      q = q.or(`name.ilike.%${search}%,code.ilike.%${search}%`)
-    }
+    if (search) q = q.or(`name.ilike.%${search}%,code.ilike.%${search}%`)
 
     const { data, count, error } = await q.range(offset, offset + safeLimit - 1)
 
@@ -201,24 +195,12 @@ export class SchoolsRepository {
 
   // ── Write ─────────────────────────────────────────────────────────
 
-  async create(input: unknown): Promise<SchoolRow> {
-    const parsed = SchoolCreateSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join(".")}: ${e.message}`)
-          .join(", ")
-      )
-    }
-
-    logger.info("schools", "create", {
-      name: parsed.data.name,
-      code: parsed.data.code,
-    })
+  async create(record: InternalSchoolInput): Promise<SchoolRow> {
+    logger.info("schools", "create", { name: record.name, code: record.code })
 
     const { data, error } = await this.db
       .from("schools")
-      .insert(parsed.data as unknown as SchoolInsert)
+      .insert(record as unknown as SchoolInsert)
       .select(SAFE_COLS)
       .single()
 
@@ -227,29 +209,38 @@ export class SchoolsRepository {
     return data as unknown as SchoolRow
   }
 
-  async update(id: string, input: unknown): Promise<SchoolRow> {
-    const parsed = SchoolUpdateSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join(".")}: ${e.message}`)
-          .join(", ")
-      )
-    }
-
+  // General profile update — name, contact details, timezone
+  async update(id: string, data: InternalSchoolUpdate): Promise<SchoolRow> {
     logger.info("schools", "update", { id })
+    return this._update(id, data, "update")
+  }
 
-    const { data, error } = await this.db
+  // Branding update — logo only, separate workflow
+  async updateBranding(
+    id: string,
+    data: InternalSchoolBrandingUpdate
+  ): Promise<SchoolRow> {
+    logger.info("schools", "updateBranding", { id })
+    return this._update(id, data, "updateBranding")
+  }
+
+  // Single internal update — all public update methods route here
+  private async _update(
+    id: string,
+    data: object,
+    operation: string
+  ): Promise<SchoolRow> {
+    const { data: row, error } = await this.db
       .from("schools")
-      .update(parsed.data as unknown as SchoolUpdate)
+      .update({ ...data, updated_at: new Date().toISOString() })
       .eq("id", id)
       .select(SAFE_COLS)
       .single()
 
     if (error?.code === "PGRST116") throw new NotFoundError("School", id)
-    if (error) this.handleDbError(error, "update")
-    if (!data) throw new NotFoundError("School", id)
-    return data as unknown as SchoolRow
+    if (error) this.handleDbError(error, operation)
+    if (!row) throw new NotFoundError("School", id)
+    return row as unknown as SchoolRow
   }
 
   /**
@@ -330,7 +321,10 @@ export class SchoolsRepository {
 
       const { data: updated, error: updateError } = await this.db
         .from("schools")
-        .update({ settings: merged as unknown as Json, updated_at: new Date().toISOString() })
+        .update({
+          settings: merged as unknown as Json,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", id)
         .select(ADMIN_COLS)
         .single()

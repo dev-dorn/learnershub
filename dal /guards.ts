@@ -118,6 +118,9 @@ export function requireAdmin(role: UserRole): void {
 export function requireStaff(role: UserRole): void {
   requireRole(role, STAFF_ROLES)
 }
+export function requireStudent(role: UserRole): void {
+  requireRole(role, ['student'])
+}
 /**
  * Throws if the user is not a student.
  * Use for student-only resources.

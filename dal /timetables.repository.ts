@@ -1,55 +1,58 @@
 // src/dal/timetables.repository.ts
 import { SupabaseClient, PostgrestError } from '@supabase/supabase-js'
 import { Database } from '@/types/supabase'
-import { z } from 'zod'
-import { DALError, NotFoundError, ValidationError, ConflictError, DatabaseError } from './errors'
+import { DALError, NotFoundError, ConflictError, DatabaseError } from './errors'
 import { logger } from '@/lib/logger'
 
 // ── Types ─────────────────────────────────────────────────────────────
 
 type TimetableRow    = Database['public']['Tables']['timetables']['Row']
 type TimetableInsert = Database['public']['Tables']['timetables']['Insert']
-type TimetableUpdate = Database['public']['Tables']['timetables']['Update']
 
-// ── Schemas ───────────────────────────────────────────────────────────
+// ── Internal input types ──────────────────────────────────────────────
 
-const TIME_REGEX    = /^([01]\d|2[0-3]):([0-5]\d)$/        // HH:MM
-const YEAR_REGEX    = /^\d{4}\/\d{4}$/                      // 2024/2025
+export interface InternalTimetableInput {
+  // Required
+  academic_year: string        // format YYYY/YYYY, validated upstream
+  class_id:      string
+  day_of_week:   'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday'
+  end_time:      string        // HH:MM, validated upstream — must be after start_time
+  start_time:    string        // HH:MM, validated upstream
+  subject_id:    string
+  teacher_id:    string
+  school_id:     string        // always from session
 
-const TimetableInsertSchema = z.object({
-  // Required / non-nullable
-  academic_year: z.string().regex(YEAR_REGEX, 'Must be in format YYYY/YYYY e.g. 2024/2025'),
-  class_id:      z.string().uuid(),
-  day_of_week:   z.enum(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']),
-  end_time:      z.string().regex(TIME_REGEX, 'Must be in format HH:MM'),
-  start_time:    z.string().regex(TIME_REGEX, 'Must be in format HH:MM'),
-  subject_id:    z.string().uuid(),
-  teacher_id:    z.string().uuid(),
-  school_id:     z.string().uuid(),
+  // Optional
+  is_active?:     boolean | null
+  period_name?:   string | null
+  room_location?: string | null
+  term?:          'term_1' | 'term_2' | 'term_3' | null
+}
 
-  // Optional / nullable
-  is_active:     z.boolean().nullable().optional().default(true),
-  period_name:   z.string().max(50).nullable().optional(),
-  room_location: z.string().max(100).nullable().optional(),
-  term:          z.enum(['term_1', 'term_2', 'term_3']).nullable().optional(),
-}).refine(
-  data => data.start_time < data.end_time,
-  { message: 'start_time must be before end_time', path: ['start_time'] }
-)
+// Narrow update types per operation domain
+// class_id and school_id are structural — they never change after creation
 
-const TimetableUpdateSchema = TimetableInsertSchema
-  .omit({ school_id: true, class_id: true })  // structural fields never change
-  .partial()
+export interface InternalTimetableUpdate {
+  academic_year?: string
+  day_of_week?:   'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday'
+  end_time?:      string
+  start_time?:    string
+  subject_id?:    string
+  teacher_id?:    string
+  period_name?:   string | null
+  room_location?: string | null
+  term?:          'term_1' | 'term_2' | 'term_3' | null
+}
 
-// ── Exported input types ──────────────────────────────────────────────
-
-export type CreateTimetableInput = z.infer<typeof TimetableInsertSchema>
-export type UpdateTimetableInput = z.infer<typeof TimetableUpdateSchema>
+export interface InternalActiveUpdate {
+  is_active: boolean
+}
 
 // ── List options ──────────────────────────────────────────────────────
 
+// schoolId is intentionally excluded — always passed as a mandatory
+// separate param from session context. NEVER add schoolId here.
 export interface ListTimetablesOptions {
-  schoolId?:     string
   classId?:      string
   teacherId?:    string
   subjectId?:    string
@@ -61,7 +64,7 @@ export interface ListTimetablesOptions {
   offset?:       number
 }
 
-// ── Pagination result ─────────────────────────────────────────────────
+// ── Result types ──────────────────────────────────────────────────────
 
 export interface PaginatedTimetables {
   data:    TimetableRow[]
@@ -122,7 +125,7 @@ export class TimetablesRepository {
       case '23503': throw new DALError('FOREIGN_KEY_ERROR', `Related record not found: ${operation}`)
       case '23502': throw new DALError('VALIDATION_ERROR', `Required field missing: ${error.details}`)
       case '23514': throw new DALError('VALIDATION_ERROR', `Value out of allowed range: ${error.details}`)
-      case '42501': throw new DALError('UNAUTHORIZED', 'You do not have permission to access this resource')
+      case '42501': throw new DALError('UNAUTHORIZED', 'RLS policy violation — insufficient permissions')
       default:      throw new DatabaseError(operation, error)
     }
   }
@@ -135,11 +138,12 @@ export class TimetablesRepository {
 
   // ── Read ──────────────────────────────────────────────────────────
 
-  async getById(id: string): Promise<TimetableRow | null> {
+  async getById(id: string, schoolId: string): Promise<TimetableRow | null> {
     logger.info('timetables', 'getById', { id })
 
     const { data, error } = await this.safeSelect()
       .eq('id', id)
+      .eq('school_id', schoolId)  // ← tenant isolation
       .single()
 
     if (error?.code === 'PGRST116') return null
@@ -148,9 +152,8 @@ export class TimetablesRepository {
     return data as unknown as TimetableRow
   }
 
-  async list(options: ListTimetablesOptions = {}): Promise<PaginatedTimetables> {
+  async list(options: ListTimetablesOptions, schoolId: string): Promise<PaginatedTimetables> {
     const {
-      schoolId,
       classId,
       teacherId,
       subjectId,
@@ -173,8 +176,8 @@ export class TimetablesRepository {
     let q = this.db
       .from('timetables')
       .select(SAFE_COLS, { count: 'exact' })
+      .eq('school_id', schoolId)  // ← tenant isolation always applied first
 
-    if (schoolId)     q = q.eq('school_id', schoolId)
     if (classId)      q = q.eq('class_id', classId)
     if (teacherId)    q = q.eq('teacher_id', teacherId)
     if (subjectId)    q = q.eq('subject_id', subjectId)
@@ -196,18 +199,20 @@ export class TimetablesRepository {
     }
   }
 
-  // Fetches full week schedule for a class, sorted by day then time
+  // Full week schedule for a class, sorted by day then time
   async getWeeklySchedule(
     classId:      string,
     academicYear: string,
+    schoolId:     string,  // ← tenant isolation
     term?:        string
   ): Promise<TimetableRow[]> {
     logger.info('timetables', 'getWeeklySchedule', { classId, academicYear, term })
 
     let q = this.safeSelect()
-      .eq('class_id', classId)
+      .eq('class_id',      classId)
       .eq('academic_year', academicYear)
-      .eq('is_active', true)
+      .eq('school_id',     schoolId)  // ← tenant isolation
+      .eq('is_active',     true)
 
     if (term) q = q.eq('term', term)
 
@@ -215,7 +220,6 @@ export class TimetablesRepository {
 
     if (error) this.handleDbError(error, 'getWeeklySchedule')
 
-    // Sort by day order then start time client-side
     return ((data ?? []) as unknown as TimetableRow[]).sort((a, b) => {
       const dayDiff = (DAY_ORDER[a.day_of_week] ?? 0) - (DAY_ORDER[b.day_of_week] ?? 0)
       if (dayDiff !== 0) return dayDiff
@@ -223,18 +227,20 @@ export class TimetablesRepository {
     })
   }
 
-  // Fetches all periods a teacher is assigned to in a given week
+  // All periods a teacher is assigned to in a given week
   async getTeacherSchedule(
     teacherId:    string,
     academicYear: string,
+    schoolId:     string,  // ← tenant isolation
     term?:        string
   ): Promise<TimetableRow[]> {
     logger.info('timetables', 'getTeacherSchedule', { teacherId, academicYear, term })
 
     let q = this.safeSelect()
-      .eq('teacher_id', teacherId)
+      .eq('teacher_id',    teacherId)
       .eq('academic_year', academicYear)
-      .eq('is_active', true)
+      .eq('school_id',     schoolId)  // ← tenant isolation
+      .eq('is_active',     true)
 
     if (term) q = q.eq('term', term)
 
@@ -255,16 +261,18 @@ export class TimetablesRepository {
     dayOfWeek:    string,
     startTime:    string,
     academicYear: string,
+    schoolId:     string,  // ← tenant isolation
     excludeId?:   string   // pass when updating to exclude the current record
   ): Promise<boolean> {
     logger.info('timetables', 'hasTeacherConflict', { teacherId, dayOfWeek, startTime })
 
     let q = this.safeSelect('id')
-      .eq('teacher_id', teacherId)
-      .eq('day_of_week', dayOfWeek)
-      .eq('start_time', startTime)
+      .eq('teacher_id',    teacherId)
+      .eq('day_of_week',   dayOfWeek)
+      .eq('start_time',    startTime)
       .eq('academic_year', academicYear)
-      .eq('is_active', true)
+      .eq('school_id',     schoolId)  // ← tenant isolation
+      .eq('is_active',     true)
 
     if (excludeId) q = q.neq('id', excludeId)
 
@@ -279,16 +287,18 @@ export class TimetablesRepository {
     dayOfWeek:    string,
     startTime:    string,
     academicYear: string,
+    schoolId:     string,  // ← tenant isolation
     excludeId?:   string
   ): Promise<boolean> {
     logger.info('timetables', 'hasClassConflict', { classId, dayOfWeek, startTime })
 
     let q = this.safeSelect('id')
-      .eq('class_id', classId)
-      .eq('day_of_week', dayOfWeek)
-      .eq('start_time', startTime)
+      .eq('class_id',      classId)
+      .eq('day_of_week',   dayOfWeek)
+      .eq('start_time',    startTime)
       .eq('academic_year', academicYear)
-      .eq('is_active', true)
+      .eq('school_id',     schoolId)  // ← tenant isolation
+      .eq('is_active',     true)
 
     if (excludeId) q = q.neq('id', excludeId)
 
@@ -299,26 +309,17 @@ export class TimetablesRepository {
 
   // ── Write ─────────────────────────────────────────────────────────
 
-  async create(input: unknown): Promise<TimetableRow> {
-    const parsed = TimetableInsertSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join('.')}: ${e.message}`)
-          .join(', ')
-      )
-    }
-
+  async create(record: InternalTimetableInput): Promise<TimetableRow> {
     logger.info('timetables', 'create', {
-      class_id:   parsed.data.class_id,
-      teacher_id: parsed.data.teacher_id,
-      day_of_week: parsed.data.day_of_week,
-      start_time: parsed.data.start_time,
+      class_id:    record.class_id,
+      teacher_id:  record.teacher_id,
+      day_of_week: record.day_of_week,
+      start_time:  record.start_time,
     })
 
     const { data, error } = await this.db
       .from('timetables')
-      .insert(parsed.data as unknown as TimetableInsert)
+      .insert(record as unknown as TimetableInsert)
       .select(SAFE_COLS)
       .single()
 
@@ -327,89 +328,115 @@ export class TimetablesRepository {
     return data as unknown as TimetableRow
   }
 
-  async update(id: string, input: unknown): Promise<TimetableRow> {
-    const parsed = TimetableUpdateSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join('.')}: ${e.message}`)
-          .join(', ')
-      )
-    }
-
+  // Schedule content update — timing, subject, teacher, room
+  async update(
+    id:       string,
+    data:     InternalTimetableUpdate,
+    schoolId: string
+  ): Promise<TimetableRow> {
     logger.info('timetables', 'update', { id })
+    return this._update(id, data, schoolId, 'update')
+  }
 
-    const { data, error } = await this.db
+  // Active state update — separate from schedule content
+  async updateActiveState(
+    id:       string,
+    data:     InternalActiveUpdate,
+    schoolId: string
+  ): Promise<TimetableRow> {
+    logger.info('timetables', 'updateActiveState', { id, is_active: data.is_active })
+    return this._update(id, data, schoolId, 'updateActiveState')
+  }
+
+  // Convenience wrappers — route through updateActiveState
+  async activate(id: string, schoolId: string): Promise<TimetableRow> {
+    return this.updateActiveState(id, { is_active: true }, schoolId)
+  }
+
+  async deactivate(id: string, schoolId: string): Promise<TimetableRow> {
+    return this.updateActiveState(id, { is_active: false }, schoolId)
+  }
+
+  // Single internal update — all public update methods route here
+  // school_id on every update prevents cross-tenant writes
+  private async _update(
+    id:        string,
+    data:      object,
+    schoolId:  string,
+    operation: string
+  ): Promise<TimetableRow> {
+    const { data: row, error } = await this.db
       .from('timetables')
-      .update(parsed.data as unknown as TimetableUpdate)
-      .eq('id', id)
+      .update({ ...data, updated_at: new Date().toISOString() })
+      .eq('id',        id)
+      .eq('school_id', schoolId)  // ← tenant isolation on every write
       .select(SAFE_COLS)
       .single()
 
     if (error?.code === 'PGRST116') throw new NotFoundError('Timetable', id)
-    if (error) this.handleDbError(error, 'update')
-    if (!data) throw new NotFoundError('Timetable', id)
-    return data as unknown as TimetableRow
+    if (error) this.handleDbError(error, operation)
+    if (!row) throw new NotFoundError('Timetable', id)
+    return row as unknown as TimetableRow
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(id: string, schoolId: string): Promise<void> {
     logger.info('timetables', 'delete', { id })
 
-    const exists = await this.getById(id)
-    if (!exists) throw new NotFoundError('Timetable', id)
-
-    const { error } = await this.db
+    // Single round-trip — no pre-flight getById
+    // school_id filter prevents cross-tenant deletes
+    const { data, error } = await this.db
       .from('timetables')
       .delete()
-      .eq('id', id)
+      .eq('id',        id)
+      .eq('school_id', schoolId)  // ← tenant isolation
+      .select('id')
 
     if (error) this.handleDbError(error, 'delete')
-  }
-
-  // ── Status ────────────────────────────────────────────────────────
-
-  async activate(id: string): Promise<TimetableRow> {
-    logger.info('timetables', 'activate', { id })
-    return this.update(id, { is_active: true })
-  }
-
-  async deactivate(id: string): Promise<TimetableRow> {
-    logger.info('timetables', 'deactivate', { id })
-    return this.update(id, { is_active: false })
+    if (!data || data.length === 0) throw new NotFoundError('Timetable', id)
   }
 
   // ── Bulk operations ───────────────────────────────────────────────
 
   // Deactivates all timetable entries for a class in a given academic year
-  async deactivateByClass(classId: string, academicYear: string): Promise<void> {
+  async deactivateByClass(
+    classId:      string,
+    academicYear: string,
+    schoolId:     string   // ← tenant isolation
+  ): Promise<void> {
     logger.info('timetables', 'deactivateByClass', { classId, academicYear })
 
     const { error } = await this.db
       .from('timetables')
       .update({ is_active: false, updated_at: new Date().toISOString() })
-      .eq('class_id', classId)
+      .eq('class_id',      classId)
       .eq('academic_year', academicYear)
+      .eq('school_id',     schoolId)  // ← tenant isolation
 
     if (error) this.handleDbError(error, 'deactivateByClass')
   }
 
-  // Deactivates all timetable entries for a teacher — useful when teacher leaves
-  async deactivateByTeacher(teacherId: string): Promise<void> {
+  // Deactivates all timetable entries for a teacher — when teacher leaves
+  async deactivateByTeacher(
+    teacherId: string,
+    schoolId:  string   // ← tenant isolation
+  ): Promise<void> {
     logger.info('timetables', 'deactivateByTeacher', { teacherId })
 
     const { error } = await this.db
       .from('timetables')
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq('teacher_id', teacherId)
+      .eq('school_id',  schoolId)  // ← tenant isolation
 
     if (error) this.handleDbError(error, 'deactivateByTeacher')
   }
 
-  // Reassigns all periods from one teacher to another — useful for substitution
+  // Reassigns all periods from one teacher to another — substitution
   async reassignTeacher(
     fromTeacherId: string,
     toTeacherId:   string,
     academicYear:  string,
+    schoolId:      string,  // ← tenant isolation
     term?:         string
   ): Promise<void> {
     logger.info('timetables', 'reassignTeacher', { fromTeacherId, toTeacherId, academicYear })
@@ -417,8 +444,9 @@ export class TimetablesRepository {
     let q = this.db
       .from('timetables')
       .update({ teacher_id: toTeacherId, updated_at: new Date().toISOString() })
-      .eq('teacher_id', fromTeacherId)
+      .eq('teacher_id',    fromTeacherId)
       .eq('academic_year', academicYear)
+      .eq('school_id',     schoolId)  // ← tenant isolation
 
     if (term) q = q.eq('term', term)
 

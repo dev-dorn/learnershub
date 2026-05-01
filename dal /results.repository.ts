@@ -1,11 +1,9 @@
 // src/dal/results.repository.ts
 import { SupabaseClient, PostgrestError } from "@supabase/supabase-js"
 import { Database } from "@/types/supabase"
-import { z } from "zod"
 import {
   DALError,
   NotFoundError,
-  ValidationError,
   ConflictError,
   DatabaseError,
 } from "./errors"
@@ -13,74 +11,77 @@ import { logger } from "@/lib/logger"
 
 // ── Types ─────────────────────────────────────────────────────────────
 
-type ResultRow = Database["public"]["Tables"]["results"]["Row"]
+type ResultRow    = Database["public"]["Tables"]["results"]["Row"]
 type ResultInsert = Database["public"]["Tables"]["results"]["Insert"]
-type ResultUpdate = Database["public"]["Tables"]["results"]["Update"]
 
-// ── Schemas ───────────────────────────────────────────────────────────
+// ── Internal input types ──────────────────────────────────────────────
 
-const YEAR_REGEX = /^\d{4}\/\d{4}$/ // 2024/2025
+export interface InternalResultInput {
+  // Required
+  academic_year:    string        // validated upstream — format YYYY/YYYY
+  class_subject_id: string
+  school_id:        string        // always from session
+  student_id:       string
+  term:             "term_1" | "term_2" | "term_3"
 
-const ResultInsertSchema = z.object({
-  // Required / non-nullable
-  academic_year: z
-    .string()
-    .regex(YEAR_REGEX, "Must be in format YYYY/YYYY e.g. 2024/2025"),
-  class_subject_id: z.string().uuid(),
-  student_id: z.string().uuid(),
-  school_id: z.string().uuid(),
-  term: z.enum(["term_1", "term_2", "term_3"]),
+  // Optional
+  score?:     number | null       // 0–100, validated upstream
+  grade?:     string | null       // e.g. 'A', 'B+', 'EE' — max 5 chars
+  remarks?:   string | null       // max 500 chars
+  posted_by?: string | null       // always from session when posting
+  posted_at?: string | null
+}
 
-  // Optional / nullable
-  score: z.number().min(0).max(100).nullable().optional(),
-  grade: z.string().max(5).nullable().optional(), // e.g. 'A', 'B+', 'EE'
-  remarks: z.string().max(500).nullable().optional(),
-  posted_by: z.string().uuid().nullable().optional(),
-  posted_at: z.string().nullable().optional(),
-})
+// Narrow update types per operation domain
+// Prevents cross-domain field injection at the type level
 
-const ResultUpdateSchema = ResultInsertSchema.omit({
-  student_id: true, // result always belongs to same student
-  class_subject_id: true, // result always belongs to same subject
-  school_id: true,
-}).partial()
+export interface InternalResultUpdate {
+  academic_year?: string
+  score?:         number | null
+  grade?:         string | null
+  remarks?:       string | null
+}
 
-// ── Exported input types ──────────────────────────────────────────────
+export interface InternalPostUpdate {
+  posted_by: string       // always from session
+  posted_at: string
+}
 
-export type CreateResultInput = z.infer<typeof ResultInsertSchema>
-export type UpdateResultInput = z.infer<typeof ResultUpdateSchema>
+export interface InternalRetractUpdate {
+  posted_by: null
+  posted_at: null
+}
 
 // ── List options ──────────────────────────────────────────────────────
 
+// schoolId is intentionally excluded — always passed as a mandatory
+// separate param from session context. NEVER add schoolId here.
 export interface ListResultsOptions {
-  schoolId?: string
-  studentId?: string
+  studentId?:      string
   classSubjectId?: string
-  academicYear?: string
-  term?: string
-  postedBy?: string
-  limit?: number
-  offset?: number
+  academicYear?:   string
+  term?:           string
+  postedBy?:       string
+  limit?:          number
+  offset?:         number
 }
 
-// ── Pagination result ─────────────────────────────────────────────────
+// ── Result types ──────────────────────────────────────────────────────
 
 export interface PaginatedResults {
-  data: ResultRow[]
-  count: number
+  data:    ResultRow[]
+  count:   number
   hasMore: boolean
 }
 
-// ── Summary types ─────────────────────────────────────────────────────
-
 export interface StudentTermSummary {
-  studentId: string
-  academicYear: string
-  term: string
-  results: ResultRow[]
-  average: number | null
+  studentId:     string
+  academicYear:  string
+  term:          string
+  results:       ResultRow[]
+  average:       number | null
   totalSubjects: number
-  graded: number // subjects with a score
+  graded:        number           // subjects with a score
 }
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -100,8 +101,8 @@ const SAFE_COLS = [
   "updated_at",
 ].join(", ")
 
-const DEFAULT_LIMIT = 50
-const MAX_LIMIT = 200
+const DEFAULT_LIMIT  = 50
+const MAX_LIMIT      = 200
 const DEFAULT_OFFSET = 0
 
 // ── Repository ────────────────────────────────────────────────────────
@@ -113,37 +114,22 @@ export class ResultsRepository {
 
   private handleDbError(error: PostgrestError, operation: string): never {
     logger.error("results", `PostgREST error during ${operation}`, {
-      code: error.code,
-      hint: error.hint,
+      code:    error.code,
+      hint:    error.hint,
       details: error.details,
     })
 
     switch (error.code) {
       case "23505":
-        throw new ConflictError(
-          "Result",
-          "student, class_subject, term and academic_year"
-        )
+        throw new ConflictError("Result", "student, class_subject, term and academic_year")
       case "23503":
-        throw new DALError(
-          "FOREIGN_KEY_ERROR",
-          `Related record not found: ${operation}`
-        )
+        throw new DALError("FOREIGN_KEY_ERROR", `Related record not found: ${operation}`)
       case "23502":
-        throw new DALError(
-          "VALIDATION_ERROR",
-          `Required field missing: ${error.details}`
-        )
+        throw new DALError("VALIDATION_ERROR", `Required field missing: ${error.details}`)
       case "23514":
-        throw new DALError(
-          "VALIDATION_ERROR",
-          `Value out of allowed range: ${error.details}`
-        )
+        throw new DALError("VALIDATION_ERROR", `Value out of allowed range: ${error.details}`)
       case "42501":
-        throw new DALError(
-          "UNAUTHORIZED",
-          "You do not have permission to access this resource"
-        )
+        throw new DALError("UNAUTHORIZED", "RLS policy violation — insufficient permissions")
       default:
         throw new DatabaseError(operation, error)
     }
@@ -157,10 +143,13 @@ export class ResultsRepository {
 
   // ── Read ──────────────────────────────────────────────────────────
 
-  async getById(id: string): Promise<ResultRow | null> {
+  async getById(id: string, schoolId: string): Promise<ResultRow | null> {
     logger.info("results", "getById", { id })
 
-    const { data, error } = await this.safeSelect().eq("id", id).single()
+    const { data, error } = await this.safeSelect()
+      .eq("id", id)
+      .eq("school_id", schoolId)  // ← tenant isolation
+      .single()
 
     if (error?.code === "PGRST116") return null
     if (error) this.handleDbError(error, "getById")
@@ -168,123 +157,117 @@ export class ResultsRepository {
     return data as unknown as ResultRow
   }
 
-  async list(options: ListResultsOptions = {}): Promise<PaginatedResults> {
+  async list(options: ListResultsOptions, schoolId: string): Promise<PaginatedResults> {
     const {
-      schoolId,
       studentId,
       classSubjectId,
       academicYear,
       term,
       postedBy,
-      limit = DEFAULT_LIMIT,
+      limit  = DEFAULT_LIMIT,
       offset = DEFAULT_OFFSET,
     } = options
 
     const safeLimit = Math.min(limit, MAX_LIMIT)
 
     logger.info("results", "list", {
-      schoolId,
-      studentId,
-      classSubjectId,
-      academicYear,
-      term,
-      limit: safeLimit,
-      offset,
+      schoolId, studentId, classSubjectId,
+      academicYear, term, limit: safeLimit, offset,
     })
 
-    let q = this.db.from("results").select(SAFE_COLS, { count: "exact" })
+    let q = this.db
+      .from("results")
+      .select(SAFE_COLS, { count: "exact" })
+      .eq("school_id", schoolId)  // ← tenant isolation always applied first
 
-    if (schoolId) q = q.eq("school_id", schoolId)
-    if (studentId) q = q.eq("student_id", studentId)
+    if (studentId)      q = q.eq("student_id", studentId)
     if (classSubjectId) q = q.eq("class_subject_id", classSubjectId)
-    if (academicYear) q = q.eq("academic_year", academicYear)
-    if (term) q = q.eq("term", term)
-    if (postedBy) q = q.eq("posted_by", postedBy)
+    if (academicYear)   q = q.eq("academic_year", academicYear)
+    if (term)           q = q.eq("term", term)
+    if (postedBy)       q = q.eq("posted_by", postedBy)
 
     const { data, count, error } = await q
       .range(offset, offset + safeLimit - 1)
       .order("academic_year", { ascending: false })
-      .order("term", { ascending: true })
+      .order("term",          { ascending: true  })
 
     if (error) this.handleDbError(error, "list")
 
     return {
-      data: (data ?? []) as unknown as ResultRow[],
-      count: count ?? 0,
+      data:    (data ?? []) as unknown as ResultRow[],
+      count:   count ?? 0,
       hasMore: (count ?? 0) > offset + safeLimit,
     }
   }
 
-  // Fetches all results for a student in a term and computes summary
+  // All results for a student in a term — computes summary in-process
   async getStudentTermSummary(
-    studentId: string,
+    studentId:    string,
     academicYear: string,
-    term: string
+    term:         string,
+    schoolId:     string   // ← tenant isolation
   ): Promise<StudentTermSummary> {
-    logger.info("results", "getStudentTermSummary", {
-      studentId,
-      academicYear,
-      term,
-    })
+    logger.info("results", "getStudentTermSummary", { studentId, academicYear, term })
 
     const { data, error } = await this.safeSelect()
-      .eq("student_id", studentId)
+      .eq("student_id",   studentId)
       .eq("academic_year", academicYear)
-      .eq("term", term)
+      .eq("term",          term)
+      .eq("school_id",     schoolId)  // ← tenant isolation
 
     if (error) this.handleDbError(error, "getStudentTermSummary")
 
     const results = (data ?? []) as unknown as ResultRow[]
-    const graded = results.filter((r) => r.score !== null)
-    const average =
-      graded.length > 0
-        ? graded.reduce((sum, r) => sum + (r.score ?? 0), 0) / graded.length
-        : null
+    const graded  = results.filter((r) => r.score !== null)
+    const sum     = graded.reduce((acc, r) => acc + (r.score ?? 0), 0)
+    const average = graded.length > 0
+      ? Math.round((sum / graded.length) * 100) / 100
+      : null
 
     return {
       studentId,
       academicYear,
       term,
       results,
-      average: average !== null ? Math.round(average * 100) / 100 : null,
+      average,
       totalSubjects: results.length,
-      graded: graded.length,
+      graded:        graded.length,
     }
   }
 
-  // Fetches all results for a student across all terms in an academic year
+  // All results for a student across all terms in a year
   async getStudentYearResults(
-    studentId: string,
-    academicYear: string
+    studentId:    string,
+    academicYear: string,
+    schoolId:     string   // ← tenant isolation
   ): Promise<ResultRow[]> {
     logger.info("results", "getStudentYearResults", { studentId, academicYear })
 
     const { data, error } = await this.safeSelect()
-      .eq("student_id", studentId)
+      .eq("student_id",    studentId)
       .eq("academic_year", academicYear)
-      .order("term", { ascending: true })
+      .eq("school_id",     schoolId)  // ← tenant isolation
+      .order("term",       { ascending: true })
 
     if (error) this.handleDbError(error, "getStudentYearResults")
     return (data ?? []) as unknown as ResultRow[]
   }
 
-  // Fetches all results for a subject across all students in a term
+  // All results for a subject across all students in a term
   async getSubjectResults(
     classSubjectId: string,
-    academicYear: string,
-    term: string
+    academicYear:   string,
+    term:           string,
+    schoolId:       string  // ← tenant isolation
   ): Promise<ResultRow[]> {
-    logger.info("results", "getSubjectResults", {
-      classSubjectId,
-      academicYear,
-      term,
-    })
+    logger.info("results", "getSubjectResults", { classSubjectId, academicYear, term })
 
     const { data, error } = await this.safeSelect()
       .eq("class_subject_id", classSubjectId)
-      .eq("academic_year", academicYear)
-      .eq("term", term)
-      .order("score", { ascending: false })
+      .eq("academic_year",    academicYear)
+      .eq("term",             term)
+      .eq("school_id",        schoolId)  // ← tenant isolation
+      .order("score",         { ascending: false })
 
     if (error) this.handleDbError(error, "getSubjectResults")
     return (data ?? []) as unknown as ResultRow[]
@@ -292,25 +275,16 @@ export class ResultsRepository {
 
   // ── Write ─────────────────────────────────────────────────────────
 
-  async create(input: unknown): Promise<ResultRow> {
-    const parsed = ResultInsertSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join(".")}: ${e.message}`)
-          .join(", ")
-      )
-    }
-
+  async create(record: InternalResultInput): Promise<ResultRow> {
     logger.info("results", "create", {
-      student_id: parsed.data.student_id,
-      class_subject_id: parsed.data.class_subject_id,
-      term: parsed.data.term,
+      student_id:       record.student_id,
+      class_subject_id: record.class_subject_id,
+      term:             record.term,
     })
 
     const { data, error } = await this.db
       .from("results")
-      .insert(parsed.data as unknown as ResultInsert)
+      .insert(record as unknown as ResultInsert)
       .select(SAFE_COLS)
       .single()
 
@@ -319,82 +293,92 @@ export class ResultsRepository {
     return data as unknown as ResultRow
   }
 
-  async update(id: string, input: unknown): Promise<ResultRow> {
-    const parsed = ResultUpdateSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join(".")}: ${e.message}`)
-          .join(", ")
-      )
-    }
-
+  // Content update — score, grade, remarks only
+  async update(
+    id:       string,
+    data:     InternalResultUpdate,
+    schoolId: string
+  ): Promise<ResultRow> {
     logger.info("results", "update", { id })
+    return this._update(id, data, schoolId, "update")
+  }
 
-    const { data, error } = await this.db
+  // Post a result — posted_by always from session
+  async post(
+    id:       string,
+    postedBy: string,
+    schoolId: string
+  ): Promise<ResultRow> {
+    logger.info("results", "post", { id, postedBy })
+    const data: InternalPostUpdate = {
+      posted_by: postedBy,
+      posted_at: new Date().toISOString(),
+    }
+    return this._update(id, data, schoolId, "post")
+  }
+
+  // Retract a posted result — clears posted_by and posted_at
+  async retract(id: string, schoolId: string): Promise<ResultRow> {
+    logger.info("results", "retract", { id })
+    const data: InternalRetractUpdate = { posted_by: null, posted_at: null }
+    return this._update(id, data, schoolId, "retract")
+  }
+
+  // Single internal update — all public update methods route here
+  // school_id on every update prevents cross-tenant writes
+  private async _update(
+    id:        string,
+    data:      object,
+    schoolId:  string,
+    operation: string
+  ): Promise<ResultRow> {
+    const { data: row, error } = await this.db
       .from("results")
-      .update(parsed.data as unknown as ResultUpdate)
-      .eq("id", id)
+      .update({ ...data, updated_at: new Date().toISOString() })
+      .eq("id",        id)
+      .eq("school_id", schoolId)  // ← tenant isolation on every write
       .select(SAFE_COLS)
       .single()
 
     if (error?.code === "PGRST116") throw new NotFoundError("Result", id)
-    if (error) this.handleDbError(error, "update")
-    if (!data) throw new NotFoundError("Result", id)
-    return data as unknown as ResultRow
+    if (error) this.handleDbError(error, operation)
+    if (!row) throw new NotFoundError("Result", id)
+    return row as unknown as ResultRow
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(id: string, schoolId: string): Promise<void> {
     logger.info("results", "delete", { id })
 
-    const exists = await this.getById(id)
-    if (!exists) throw new NotFoundError("Result", id)
-
-    const { error } = await this.db.from("results").delete().eq("id", id)
+    // Single round-trip — no pre-flight getById
+    // school_id filter prevents cross-tenant deletes
+    const { data, error } = await this.db
+      .from("results")
+      .delete()
+      .eq("id",        id)
+      .eq("school_id", schoolId)  // ← tenant isolation
+      .select("id")
 
     if (error) this.handleDbError(error, "delete")
-  }
-
-  // ── Posting ───────────────────────────────────────────────────────
-
-  // Marks a result as officially posted by a teacher
-  async post(id: string, postedBy: string): Promise<ResultRow> {
-    logger.info("results", "post", { id, postedBy })
-    return this.update(id, {
-      posted_by: postedBy,
-      posted_at: new Date().toISOString(),
-    })
-  }
-
-  // Retracts a posted result — clears posted_by and posted_at
-  async retract(id: string): Promise<ResultRow> {
-    logger.info("results", "retract", { id })
-    return this.update(id, {
-      posted_by: null,
-      posted_at: null,
-    })
+    if (!data || data.length === 0) throw new NotFoundError("Result", id)
   }
 
   // ── Bulk operations ───────────────────────────────────────────────
 
-  // Upserts multiple results at once — used for bulk score entry
-  async bulkUpsert(inputs: unknown[]): Promise<ResultRow[]> {
-    logger.info("results", "bulkUpsert", { count: inputs.length })
+  // Upserts multiple results — used for bulk score entry
+  // Validation happens upstream in the Server Action
+  async bulkUpsert(records: InternalResultInput[], schoolId: string): Promise<ResultRow[]> {
+    logger.info("results", "bulkUpsert", { count: records.length })
 
-    const parsed = z.array(ResultInsertSchema).safeParse(inputs)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `[${e.path.join(".")}]: ${e.message}`)
-          .join(", ")
-      )
+    // Reject the batch if any record has a mismatched school_id
+    if (records.some((r) => r.school_id !== schoolId)) {
+      throw new DALError("VALIDATION_ERROR", "All records must belong to the same school")
     }
 
     const { data, error } = await this.db
       .from("results")
-      .upsert(parsed.data as unknown as ResultInsert[], {
-        onConflict: "student_id, class_subject_id, term, academic_year",
-        ignoreDuplicates: false, // update on conflict
+      .upsert(records as unknown as ResultInsert[], {
+        onConflict:       "student_id, class_subject_id, term, academic_year",
+        ignoreDuplicates: false,  // update on conflict
       })
       .select(SAFE_COLS)
 
@@ -402,31 +386,28 @@ export class ResultsRepository {
     return (data ?? []) as unknown as ResultRow[]
   }
 
-  // Posts all results for a subject in a term at once
+  // Posts all unposted results for a subject in a term at once
   async bulkPost(
     classSubjectId: string,
-    academicYear: string,
-    term: string,
-    postedBy: string
+    academicYear:   string,
+    term:           string,
+    postedBy:       string,  // always from session
+    schoolId:       string   // ← tenant isolation
   ): Promise<void> {
-    logger.info("results", "bulkPost", {
-      classSubjectId,
-      academicYear,
-      term,
-      postedBy,
-    })
+    logger.info("results", "bulkPost", { classSubjectId, academicYear, term, postedBy })
 
     const { error } = await this.db
       .from("results")
       .update({
-        posted_by: postedBy,
-        posted_at: new Date().toISOString(),
+        posted_by:  postedBy,
+        posted_at:  new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("class_subject_id", classSubjectId)
-      .eq("academic_year", academicYear)
-      .eq("term", term)
-      .is("posted_at", null) // only post unposted results
+      .eq("academic_year",    academicYear)
+      .eq("term",             term)
+      .eq("school_id",        schoolId)  // ← tenant isolation
+      .is("posted_at",        null)      // only post unposted results
 
     if (error) this.handleDbError(error, "bulkPost")
   }

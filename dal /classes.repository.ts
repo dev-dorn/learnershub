@@ -1,44 +1,58 @@
 // src/dal/classes.repository.ts
 import { SupabaseClient, PostgrestError } from '@supabase/supabase-js'
 import { Database } from '@/types/supabase'
-import { z } from 'zod'
-import { DALError, NotFoundError, ValidationError, ConflictError, DatabaseError } from './errors'
+import { DALError, NotFoundError, ConflictError, DatabaseError } from './errors'
 import { logger } from '@/lib/logger'
 
 // ── Types ─────────────────────────────────────────────────────────────
 
 type ClassRow    = Database['public']['Tables']['classes']['Row']
 type ClassInsert = Database['public']['Tables']['classes']['Insert']
-type ClassUpdate = Database['public']['Tables']['classes']['Update']
 
-// ── Schemas ───────────────────────────────────────────────────────────
+// ── Internal input types ──────────────────────────────────────────────
 
-const ClassCreateSchema = z.object({
-  // Required / non-nullable
-  name:          z.string().min(1).max(100),
-  grade_level:   z.string().min(1).max(50),
-  academic_year: z.string().regex(/^\d{4}\/\d{4}$/, 'Must be in format YYYY/YYYY e.g. 2024/2025'),
-  school_id:     z.string().uuid(),
+export interface InternalClassInput {
+  // Injected by service — never from client
+  school_id: string   // from session context
 
-  // Optional / nullable
-  capacity:         z.coerce.number().int().positive().nullable().optional(),
-  class_teacher_id: z.string().uuid().nullable().optional(),
-  is_active:        z.boolean().nullable().optional().default(true),
-})
+  // From validated client input
+  name:          string
+  grade_level:   string
+  academic_year: string   // YYYY/YYYY
 
-const ClassUpdateSchema = ClassCreateSchema
-  .omit({ school_id: true })  // school should never change after creation
-  .partial()
+  // Optional
+  capacity?:         number | null
+  class_teacher_id?: string | null
+  is_active?:        boolean | null
+}
 
-// ── Exported input types ──────────────────────────────────────────────
+// Narrow update types per operation domain
 
-export type CreateClassInput = z.infer<typeof ClassCreateSchema>
-export type UpdateClassInput = z.infer<typeof ClassUpdateSchema>
+export interface InternalClassUpdate {
+  name?:          string | null
+  grade_level?:   string | null
+  academic_year?: string | null
+  capacity?:      number | null
+}
+
+export interface InternalClassTeacherUpdate {
+  class_teacher_id: string | null
+}
+
+export interface InternalClassStatusUpdate {
+  is_active:  boolean
+  updated_at: string   // always server time
+}
+
+export interface InternalClassSISUpdate {
+  sis_class_id:       string
+  sis_last_synced_at: string   // always server time
+}
 
 // ── List options ──────────────────────────────────────────────────────
 
+// schoolId intentionally excluded — always passed as separate mandatory param
 export interface ListClassesOptions {
-  schoolId?:     string
   academicYear?: string
   gradeLevel?:   string
   isActive?:     boolean
@@ -47,7 +61,7 @@ export interface ListClassesOptions {
   offset?:       number
 }
 
-// ── Pagination result ─────────────────────────────────────────────────
+// ── Result types ──────────────────────────────────────────────────────
 
 export interface PaginatedClasses {
   data:    ClassRow[]
@@ -68,6 +82,9 @@ const SAFE_COLS = [
   'school_id',
   'created_at',
   'updated_at',
+  // NOT here — internal sync fields:
+  // sis_class_id
+  // sis_last_synced_at
 ].join(', ')
 
 const DEFAULT_LIMIT  = 20
@@ -93,7 +110,7 @@ export class ClassesRepository {
       case '23503': throw new DALError('FOREIGN_KEY_ERROR', 'Referenced school or teacher does not exist')
       case '23502': throw new DALError('VALIDATION_ERROR', `Required field missing: ${error.details}`)
       case '23514': throw new DALError('VALIDATION_ERROR', `Value out of allowed range: ${error.details}`)
-      case '42501': throw new DALError('UNAUTHORIZED', 'You do not have permission to access this resource')
+      case '42501': throw new DALError('UNAUTHORIZED', 'RLS policy violation — insufficient permissions')
       default:      throw new DatabaseError(operation, error)
     }
   }
@@ -106,11 +123,12 @@ export class ClassesRepository {
 
   // ── Read ──────────────────────────────────────────────────────────
 
-  async getById(id: string): Promise<ClassRow | null> {
+  async getById(id: string, schoolId: string): Promise<ClassRow | null> {
     logger.info('classes', 'getById', { id })
 
     const { data, error } = await this.safeSelect()
       .eq('id', id)
+      .eq('school_id', schoolId)   // ← tenant isolation
       .single()
 
     if (error?.code === 'PGRST116') return null
@@ -119,12 +137,16 @@ export class ClassesRepository {
     return data as unknown as ClassRow
   }
 
-  async getByName(name: string, schoolId: string): Promise<ClassRow | null> {
+  // name is only unique per school — never query without schoolId
+  async getByName(
+    name:     string,
+    schoolId: string
+  ): Promise<ClassRow | null> {
     logger.info('classes', 'getByName', { name, schoolId })
 
     const { data, error } = await this.safeSelect()
       .eq('name', name)
-      .eq('school_id', schoolId)
+      .eq('school_id', schoolId)   // ← tenant isolation
       .single()
 
     if (error?.code === 'PGRST116') return null
@@ -135,22 +157,26 @@ export class ClassesRepository {
 
   async getByTeacherAndYear(
     teacherId:    string,
-    academicYear: string
+    academicYear: string,
+    schoolId:     string
   ): Promise<ClassRow[]> {
     logger.info('classes', 'getByTeacherAndYear', { teacherId, academicYear })
 
     const { data, error } = await this.safeSelect()
       .eq('class_teacher_id', teacherId)
       .eq('academic_year', academicYear)
+      .eq('school_id', schoolId)   // ← tenant isolation
       .eq('is_active', true)
 
     if (error) this.handleDbError(error, 'getByTeacherAndYear')
     return (data ?? []) as unknown as ClassRow[]
   }
 
-  async list(options: ListClassesOptions = {}): Promise<PaginatedClasses> {
+  async list(
+    options:  ListClassesOptions,
+    schoolId: string   // ← always from session, never from client
+  ): Promise<PaginatedClasses> {
     const {
-      schoolId,
       academicYear,
       gradeLevel,
       isActive,
@@ -168,9 +194,9 @@ export class ClassesRepository {
 
     let q = this.db
       .from('classes')
-      .select(SAFE_COLS, { count: 'exact' })  // count alongside data in one query
+      .select(SAFE_COLS, { count: 'exact' })
+      .eq('school_id', schoolId)   // ← tenant isolation always applied first
 
-    if (schoolId)              q = q.eq('school_id', schoolId)
     if (academicYear)          q = q.eq('academic_year', academicYear)
     if (gradeLevel)            q = q.eq('grade_level', gradeLevel)
     if (teacherId)             q = q.eq('class_teacher_id', teacherId)
@@ -192,25 +218,20 @@ export class ClassesRepository {
 
   // ── Write ─────────────────────────────────────────────────────────
 
-  async create(input: unknown): Promise<ClassRow> {
-    const parsed = ClassCreateSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join('.')}: ${e.message}`)
-          .join(', ')
-      )
-    }
-
+  // Called by createClassAction — school_id always injected by Server Action
+  async create(record: InternalClassInput): Promise<ClassRow> {
     logger.info('classes', 'create', {
-      name:          parsed.data.name,
-      grade_level:   parsed.data.grade_level,
-      academic_year: parsed.data.academic_year,
+      name:          record.name,
+      grade_level:   record.grade_level,
+      academic_year: record.academic_year,
     })
 
     const { data, error } = await this.db
       .from('classes')
-      .insert(parsed.data as unknown as ClassInsert)
+      .insert({
+        ...record,
+        is_active: record.is_active ?? true,
+      } as unknown as ClassInsert)
       .select(SAFE_COLS)
       .single()
 
@@ -219,83 +240,134 @@ export class ClassesRepository {
     return data as unknown as ClassRow
   }
 
-  async update(id: string, input: unknown): Promise<ClassRow> {
-    const parsed = ClassUpdateSchema.safeParse(input)
-    if (!parsed.success) {
-      throw new ValidationError(
-        parsed.error.issues
-          .map((e: z.ZodIssue) => `${e.path.join('.')}: ${e.message}`)
-          .join(', ')
-      )
-    }
+  // General content update — name, grade_level, academic_year, capacity
+  async update(
+    id:       string,
+    data:     InternalClassUpdate,
+    schoolId: string
+  ): Promise<ClassRow> {
+    return this._update(id, data, schoolId, 'update')
+  }
 
-    logger.info('classes', 'update', { id })
+  // Teacher assignment — class_teacher_id only
+  async updateTeacher(
+    id:       string,
+    data:     InternalClassTeacherUpdate,
+    schoolId: string
+  ): Promise<ClassRow> {
+    return this._update(id, data, schoolId, 'updateTeacher')
+  }
 
-    const { data, error } = await this.db
+  // Status — is_active only
+  async updateStatus(
+    id:       string,
+    data:     InternalClassStatusUpdate,
+    schoolId: string
+  ): Promise<void> {
+    logger.info('classes', 'updateStatus', { id, is_active: data.is_active })
+
+    const { error } = await this.db
       .from('classes')
-      .update(parsed.data as unknown as ClassUpdate)
+      .update(data)
       .eq('id', id)
+      .eq('school_id', schoolId)   // ← tenant isolation
+      .select('id')
+      .single()
+
+    if (error?.code === 'PGRST116') throw new NotFoundError('Class', id)
+    if (error) this.handleDbError(error, 'updateStatus')
+  }
+
+  // SIS sync — sis fields only
+  async updateSIS(
+    id:       string,
+    data:     InternalClassSISUpdate,
+    schoolId: string
+  ): Promise<ClassRow> {
+    return this._update(id, data, schoolId, 'updateSIS')
+  }
+
+  // Single internal update — all public update methods route here
+  private async _update(
+    id:        string,
+    data:      object,
+    schoolId:  string,
+    operation: string
+  ): Promise<ClassRow> {
+    const { data: row, error } = await this.db
+      .from('classes')
+      .update({ ...data, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('school_id', schoolId)   // ← tenant isolation on every write
       .select(SAFE_COLS)
       .single()
 
     if (error?.code === 'PGRST116') throw new NotFoundError('Class', id)
-    if (error) this.handleDbError(error, 'update')
-    if (!data) throw new NotFoundError('Class', id)
-    return data as unknown as ClassRow
+    if (error) this.handleDbError(error, operation)
+    if (!row) throw new NotFoundError('Class', id)
+    return row as unknown as ClassRow
   }
 
-  /**
-   * Soft delete via is_active flag.
-   * Preserves historical data and avoids RLS cascade breaks.
-   * Hard delete should be handled via admin scripts with SUPABASE_SERVICE_ROLE_KEY.
-   */
-  async deactivate(id: string): Promise<void> {
-    logger.info('classes', 'deactivate', { id })
+  // Single round-trip delete — no pre-flight getById needed
+  async delete(id: string, schoolId: string): Promise<void> {
+    logger.info('classes', 'delete', { id })
 
-    const { error } = await this.db
+    const { data, error } = await this.db
       .from('classes')
-      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .delete()
       .eq('id', id)
+      .eq('school_id', schoolId)   // ← tenant isolation
       .select('id')
-      .single()
 
-    if (error?.code === 'PGRST116') throw new NotFoundError('Class', id)
-    if (error) this.handleDbError(error, 'deactivate')
+    if (error) this.handleDbError(error, 'delete')
+    if (!data || data.length === 0) throw new NotFoundError('Class', id)
   }
 
-  async activate(id: string): Promise<void> {
+  // ── Status transitions ────────────────────────────────────────────
+
+  async activate(id: string, schoolId: string): Promise<void> {
     logger.info('classes', 'activate', { id })
+    return this.updateStatus(id, {
+      is_active:  true,
+      updated_at: new Date().toISOString(),
+    }, schoolId)
+  }
 
-    const { error } = await this.db
-      .from('classes')
-      .update({ is_active: true, updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .select('id')
-      .single()
-
-    if (error?.code === 'PGRST116') throw new NotFoundError('Class', id)
-    if (error) this.handleDbError(error, 'activate')
+  async deactivate(id: string, schoolId: string): Promise<void> {
+    logger.info('classes', 'deactivate', { id })
+    return this.updateStatus(id, {
+      is_active:  false,
+      updated_at: new Date().toISOString(),
+    }, schoolId)
   }
 
   // ── Teacher assignment ────────────────────────────────────────────
 
-  async assignTeacher(id: string, teacherId: string): Promise<ClassRow> {
+  async assignTeacher(
+    id:        string,
+    teacherId: string,
+    schoolId:  string
+  ): Promise<ClassRow> {
     logger.info('classes', 'assignTeacher', { id, teacherId })
-    return this.update(id, { class_teacher_id: teacherId })
+    return this.updateTeacher(id, { class_teacher_id: teacherId }, schoolId)
   }
 
-  async removeTeacher(id: string): Promise<ClassRow> {
+  async removeTeacher(id: string, schoolId: string): Promise<ClassRow> {
     logger.info('classes', 'removeTeacher', { id })
-    return this.update(id, { class_teacher_id: null })
+    return this.updateTeacher(id, { class_teacher_id: null }, schoolId)
   }
 
   // ── SIS sync ──────────────────────────────────────────────────────
 
-  async syncFromSIS(id: string, sisClassId: string): Promise<ClassRow> {
+  async syncFromSIS(
+    id:         string,
+    sisClassId: string,
+    schoolId:   string
+  ): Promise<ClassRow> {
     logger.info('classes', 'syncFromSIS', { id, sisClassId })
-    return this.update(id, {
+    return this.updateSIS(id, {
       sis_class_id:       sisClassId,
-      sis_last_synced_at: new Date().toISOString() as unknown as Date,
-    })
+      sis_last_synced_at: new Date().toISOString(),
+    }, schoolId)
   }
 }

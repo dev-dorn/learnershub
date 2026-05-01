@@ -238,7 +238,12 @@ export class AttendanceRepository {
           p_date_to: dateTo,
           p_school_id: schoolId,
         })
-        .single() as any
+        .single() as unknown as Promise <{
+        data:  Omit<AttendanceSummary, "studentId" | "classId" | "dateFrom" | "dateTo"> | null
+        error: PostgrestError | null
+
+      }>
+
     )
 
     if (error) this.handleDbError(error, "getStudentSummary")
@@ -261,15 +266,20 @@ export class AttendanceRepository {
   ): Promise<ClassAttendanceSummary> {
     logger.info("attendance", "getClassDailySummary", { classId, date, sessionType })
 
-    const { data, error } = await (
-      this.db
-        .rpc("get_class_daily_attendance_summary", {
-          p_class_id: classId,
-          p_date: date,
-          p_school_id: schoolId,
-          p_session_type: sessionType,
-        })
-        .single() as any
+    const { data, error } = await (this.db
+      .rpc("get_class_daily_attendance_summary", {
+        p_class_id: classId,
+        p_date: date,
+        p_school_id: schoolId,
+        p_session_type: sessionType,
+      })
+      .single() as unknown as Promise<{
+      data: Omit<
+        ClassAttendanceSummary,
+        "classId" | "date" | "sessionType"
+      > | null
+      error: PostgrestError | null
+    }>
     )
 
     if (error) this.handleDbError(error, "getClassDailySummary")
