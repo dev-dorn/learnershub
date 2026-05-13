@@ -1,8 +1,8 @@
-// src/lib/supabase/context.ts
+/// src/lib/supabase/context.ts
 import { SupabaseClient } from '@supabase/supabase-js'
 import { Database } from '@/types/supabase'
 import { logger } from '@/lib/logger'
-import { DALError } from "@/dal /errors"
+import { DALError } from "@/dal "
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -32,9 +32,8 @@ export async function getSchoolContext(
   supabase: SupabaseClient<Database>
 ): Promise<SchoolContext> {
 
-  // ── Step 1: Verify session ──────────────────────────────────────
-  // getUser() makes a network call to verify the JWT with Supabase Auth
-  // Never use getSession() for authorization — it reads from cookie only
+  // getUser() verifies JWT with Supabase Auth server
+  // Never use getSession() for authorization — reads cookie only
   const { data: { user }, error: authError } = await supabase.auth.getUser()
 
   if (authError || !user) {
@@ -44,9 +43,6 @@ export async function getSchoolContext(
     throw new DALError('UNAUTHORIZED', 'Not authenticated')
   }
 
-  // ── Step 2: Fetch profile from DB ─────────────────────────────
-  // Role and school_id always come from the DB — never from user_metadata
-  // user_metadata is client-writable and must never be trusted
   const { data: profile, error: profileError } = await supabase
     .from('profiles')
     .select('school_id, role, account_status')
@@ -58,7 +54,13 @@ export async function getSchoolContext(
     throw new DALError('UNAUTHORIZED', 'Profile not found')
   }
 
-  // ── Step 3: Check account status ─────────────────────────────
+  // school_id is string | null in generated types
+  // a profile without a school is invalid — throw instead of returning empty string
+  if (!profile.school_id) {
+    logger.warn('context', 'profile has no school_id', { userId: user.id })
+    throw new DALError('UNAUTHORIZED', 'Profile is not linked to a school')
+  }
+
   if (profile.account_status !== 'active') {
     logger.warn('context', 'inactive account attempted access', {
       userId: user.id,
@@ -72,12 +74,12 @@ export async function getSchoolContext(
 
   return {
     userId:   user.id,
-    schoolId: profile.school_id,
+    schoolId: profile.school_id,   // guaranteed string after null check above
     role:     profile.role as UserRole,
   }
 }
 
-// ── Extended context — use when you need more than just the basics ────
+// ── Extended context ──────────────────────────────────────────────────
 
 export async function getFullContext(
   supabase: SupabaseClient<Database>
@@ -98,6 +100,14 @@ export async function getFullContext(
     throw new DALError('UNAUTHORIZED', 'Profile not found')
   }
 
+  if (!profile.school_id) {
+    throw new DALError('UNAUTHORIZED', 'Profile is not linked to a school')
+  }
+
+  if (!profile.full_name) {
+    throw new DALError('UNAUTHORIZED', 'Profile has no name')
+  }
+
   if (profile.account_status !== 'active') {
     throw new DALError(
       'UNAUTHORIZED',
@@ -107,19 +117,17 @@ export async function getFullContext(
 
   return {
     userId:        user.id,
-    schoolId:      profile.school_id,
+    schoolId:      profile.school_id,              // guaranteed string
     role:          profile.role as UserRole,
     email:         user.email ?? '',
-    fullName:      profile.full_name,
-    accountStatus: profile.account_status,
+    fullName:      profile.full_name,              // guaranteed string
+    accountStatus: profile.account_status ?? 'inactive',
     mfaEnabled:    profile.mfa_enabled ?? false,
   }
 }
 
 // ── Role-specific helpers ─────────────────────────────────────────────
 
-// Use when you need to verify the caller is a specific role
-// before doing anything else in a Server Action
 export async function requireAdmin(
   supabase: SupabaseClient<Database>
 ): Promise<SchoolContext> {
@@ -140,7 +148,8 @@ export async function requireTeacher(
   return context
 }
 
-// ── Student context — returns both school context and student record id
+// ── Student context ───────────────────────────────────────────────────
+
 export async function getStudentContext(
   supabase: SupabaseClient<Database>
 ): Promise<SchoolContext & { studentId: string }> {
@@ -164,7 +173,8 @@ export async function getStudentContext(
   return { ...context, studentId: student.id }
 }
 
-// ── Parent context — returns school context and linked student ids
+// ── Parent context ────────────────────────────────────────────────────
+
 export async function getParentContext(
   supabase: SupabaseClient<Database>
 ): Promise<SchoolContext & { studentIds: string[] }> {
@@ -174,7 +184,6 @@ export async function getParentContext(
     throw new DALError('UNAUTHORIZED', 'Only parents can access this resource')
   }
 
-  // Fetch all students linked to this parent
   const { data: links, error } = await supabase
     .from('parent_student')
     .select('student_id')
@@ -187,6 +196,8 @@ export async function getParentContext(
 
   return {
     ...context,
-    studentIds: (links ?? []).map(l => l.student_id),
+    studentIds: (links ?? [])
+      .map(l => l.student_id)
+      .filter((id): id is string => id !== null),  // type guard strips nulls
   }
 }

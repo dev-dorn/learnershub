@@ -840,6 +840,69 @@ export type Database = {
           },
         ]
       }
+      invitations: {
+        Row: {
+          accepted_at: string | null
+          created_at: string | null
+          email: string
+          expires_at: string
+          id: string
+          invited_by: string | null
+          revoked_at: string | null
+          revoked_by: string | null
+          school_id: string
+          status: string
+          student_id: string
+          token_hash: string
+          updated_at: string | null
+        }
+        Insert: {
+          accepted_at?: string | null
+          created_at?: string | null
+          email: string
+          expires_at: string
+          id?: string
+          invited_by?: string | null
+          revoked_at?: string | null
+          revoked_by?: string | null
+          school_id: string
+          status?: string
+          student_id: string
+          token_hash: string
+          updated_at?: string | null
+        }
+        Update: {
+          accepted_at?: string | null
+          created_at?: string | null
+          email?: string
+          expires_at?: string
+          id?: string
+          invited_by?: string | null
+          revoked_at?: string | null
+          revoked_by?: string | null
+          school_id?: string
+          status?: string
+          student_id?: string
+          token_hash?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invitations_school_id_fkey"
+            columns: ["school_id"]
+            isOneToOne: false
+            referencedRelation: "schools"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "invitations_student_id_fkey"
+            columns: ["student_id"]
+            isOneToOne: false
+            referencedRelation: "students"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       mfa_methods: {
         Row: {
           authenticator_type: string | null
@@ -1069,7 +1132,7 @@ export type Database = {
           mfa_enabled: boolean | null
           phone: string | null
           role: string
-          school_id: string
+          school_id: string | null
           sis_id: string | null
           sis_last_synced_at: string | null
           sis_sync_status: string | null
@@ -1090,7 +1153,7 @@ export type Database = {
           mfa_enabled?: boolean | null
           phone?: string | null
           role: string
-          school_id: string
+          school_id?: string | null
           sis_id?: string | null
           sis_last_synced_at?: string | null
           sis_sync_status?: string | null
@@ -1111,7 +1174,7 @@ export type Database = {
           mfa_enabled?: boolean | null
           phone?: string | null
           role?: string
-          school_id?: string
+          school_id?: string | null
           sis_id?: string | null
           sis_last_synced_at?: string | null
           sis_sync_status?: string | null
@@ -1936,7 +1999,12 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      auth_has_permission: { Args: { p_permission: string }; Returns: boolean }
       check_account_health: { Args: { p_user_id: string }; Returns: Json }
+      cleanup_expired_invitations: {
+        Args: { p_school_id?: string }
+        Returns: number
+      }
       get_class_daily_attendance_summary: {
         Args: {
           p_class_id: string
@@ -1953,6 +2021,8 @@ export type Database = {
           total: number
         }[]
       }
+      get_my_role: { Args: never; Returns: string }
+      get_my_school_id: { Args: never; Returns: string }
       get_student_attendance_summary: {
         Args: {
           p_class_id: string
@@ -1971,6 +2041,15 @@ export type Database = {
           total: number
         }[]
       }
+      get_user_context: {
+        Args: { p_user_id: string }
+        Returns: {
+          account_status: string
+          permissions: string[]
+          role: string
+          school_id: string
+        }[]
+      }
       get_user_permissions: { Args: { p_user_id: string }; Returns: Json }
       handle_successful_login: {
         Args: {
@@ -1983,7 +2062,7 @@ export type Database = {
       }
     }
     Enums: {
-      [_ in never]: never
+      user_role: "admin" | "teacher" | "parent" | "student" | "super_admin"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -2110,6 +2189,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      user_role: ["admin", "teacher", "parent", "student", "super_admin"],
+    },
   },
 } as const

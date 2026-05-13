@@ -1,14 +1,16 @@
+// src/services/profiles.service.ts
 import { z } from "zod"
 import { logger } from "@/lib/logger"
-import { requireRole } from "@/lib/rbac"
-
 import { Database } from "@/types/supabase"
-import { DALError, ValidationError } from "@/dal /errors"
+
 import {
+  DALError,
   ListProfilesOptions,
-  PaginatedProfiles,
   ProfilesRepository,
-} from "@/dal /profiles.repository"
+  requireRole,
+  ValidationError,
+} from "@/dal "
+import { PaginatedProfiles } from "@/dal /profiles.repository"
 
 type ProfileRow = Database["public"]["Tables"]["profiles"]["Row"]
 
@@ -19,8 +21,6 @@ const ProfileCreateSchema = z.object({
   role: z.enum(["admin", "principal", "teacher", "student", "parent"]),
   phone: z.string().max(20).nullable().optional(),
   avatar_url: z.string().url().nullable().optional(),
-  // id, school_id injected from session — never from client
-  // role should come from the onboarding/invite flow, not free-form client input
 })
 
 const ProfileUpdateSchema = z.object({
@@ -35,9 +35,9 @@ export type UpdateProfileInput = z.infer<typeof ProfileUpdateSchema>
 // ── Context ───────────────────────────────────────────────────────────
 
 export interface ProfileContext {
-  schoolId: string // from auth session app_metadata
-  userId: string // from auth session (auth.users.id)
-  role: string // from profiles.role via getByIdForAuth
+  schoolId: string
+  userId: string
+  role: string
 }
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -50,10 +50,8 @@ const SIS_ROLES = ["admin"] as const
 export class ProfilesService {
   constructor(private repo: ProfilesRepository) {}
 
-  // ── Auth flow — called by middleware, not HTTP handlers ───────────
+  // ── Auth flow ─────────────────────────────────────────────────────
 
-  // Called by middleware on every request to build context
-  // Uses getByIdForAuth — the one query without school_id
   async loadSessionContext(userId: string): Promise<ProfileContext> {
     const profile = await this.repo.getByIdForAuth(userId)
 
@@ -71,22 +69,26 @@ export class ProfilesService {
         )
     }
 
+    // school_id is string | null — throw if missing
+    if (!profile.school_id) {
+      logger.warn("profiles.service", "profile has no school_id", { userId })
+      throw new DALError("UNAUTHORIZED", "Profile is not linked to a school")
+    }
+
     return {
-      schoolId: profile.school_id,
+      schoolId: profile.school_id, // guaranteed string
       userId: profile.id,
       role: profile.role,
     }
   }
 
-  // Called after successful Supabase login
   async recordLogin(userId: string): Promise<void> {
     await this.repo.updateLastLogin(userId, {
       last_login_at: new Date().toISOString(),
-      failed_login_attempts: 0, // reset on success
+      failed_login_attempts: 0,
     })
   }
 
-  // Called after failed login attempt
   async recordFailedLogin(
     userId: string,
     currentAttempts: number
@@ -100,18 +102,29 @@ export class ProfilesService {
       shouldLock,
     })
 
-    await this.repo.updateAccountStatus(
-      userId,
-      {
-        account_status: shouldLock ? "locked" : "active",
-        failed_login_attempts: attempts,
-        locked_until: shouldLock
-          ? new Date(Date.now() + 30 * 60 * 1000).toISOString() // 30 min lockout
-          : null,
-        // No schoolId needed — called during auth before context exists
-      } as any,
-      ""
-    )
+    // Always update attempt count
+    await this.repo.updateLastLogin(userId, {
+      last_login_at: new Date().toISOString(),
+      failed_login_attempts: attempts,
+    })
+
+    // Lock account if threshold reached
+    if (shouldLock) {
+      logger.warn("profiles", "locking account after max failed attempts", {
+        userId,
+        attempts,
+      })
+
+      await this.repo.updateAccountStatus(
+        userId,
+        {
+          account_status: "locked",
+          failed_login_attempts: attempts,
+          locked_until: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        },
+        "" // no schoolId during auth flow — called before context exists
+      )
+    }
   }
 
   // ── Read ──────────────────────────────────────────────────────────
@@ -123,7 +136,6 @@ export class ProfilesService {
     return this.repo.getById(id, context.schoolId)
   }
 
-  // Current user's own profile
   async getMe(context: ProfileContext): Promise<ProfileRow | null> {
     return this.repo.getById(context.userId, context.schoolId)
   }
@@ -132,20 +144,18 @@ export class ProfilesService {
     options: ListProfilesOptions,
     context: ProfileContext
   ): Promise<PaginatedProfiles> {
-    requireRole(context.role, ADMIN_ROLES, "list profiles")
+    requireRole(context.role as never, [...ADMIN_ROLES])
     return this.repo.list(options, context.schoolId)
   }
 
   // ── Write ─────────────────────────────────────────────────────────
 
-  // Called once during onboarding after Supabase signup
-  // id must be the auth.users.id from the Supabase session
   async create(
     input: unknown,
-    userId: string, // from Supabase auth — not from request body
+    userId: string,
     context: ProfileContext
   ): Promise<ProfileRow> {
-    requireRole(context.role, ADMIN_ROLES, "create profiles")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
     const parsed = ProfileCreateSchema.safeParse(input)
     if (!parsed.success)
@@ -157,12 +167,11 @@ export class ProfilesService {
 
     return this.repo.create({
       ...parsed.data,
-      id: userId, // ← from Supabase auth.users.id
-      school_id: context.schoolId, // ← always from session
+      id: userId,
+      school_id: context.schoolId,
     })
   }
 
-  // User updating their own profile
   async updateMe(input: unknown, context: ProfileContext): Promise<ProfileRow> {
     const parsed = ProfileUpdateSchema.safeParse(input)
     if (!parsed.success)
@@ -175,13 +184,12 @@ export class ProfilesService {
     return this.repo.update(context.userId, parsed.data, context.schoolId)
   }
 
-  // Admin updating any profile
   async update(
     id: string,
     input: unknown,
     context: ProfileContext
   ): Promise<ProfileRow> {
-    requireRole(context.role, ADMIN_ROLES, "update profiles")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
     const parsed = ProfileUpdateSchema.safeParse(input)
     if (!parsed.success)
@@ -195,22 +203,21 @@ export class ProfilesService {
   }
 
   async delete(id: string, context: ProfileContext): Promise<void> {
-    requireRole(context.role, ADMIN_ROLES, "delete profiles")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
-    // Prevent self-deletion
     if (id === context.userId)
       throw new DALError("VALIDATION_ERROR", "Cannot delete your own profile")
 
     return this.repo.delete(id, context.schoolId)
   }
 
-  // ── Account management — admin only ──────────────────────────────
+  // ── Account management ────────────────────────────────────────────
 
   async suspendAccount(
     id: string,
     context: ProfileContext
   ): Promise<ProfileRow> {
-    requireRole(context.role, ADMIN_ROLES, "suspend accounts")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
     if (id === context.userId)
       throw new DALError("VALIDATION_ERROR", "Cannot suspend your own account")
@@ -234,7 +241,7 @@ export class ProfilesService {
     id: string,
     context: ProfileContext
   ): Promise<ProfileRow> {
-    requireRole(context.role, ADMIN_ROLES, "activate accounts")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
     logger.info("profiles", "activateAccount", {
       id,
@@ -256,9 +263,12 @@ export class ProfilesService {
     id: string,
     context: ProfileContext
   ): Promise<ProfileRow> {
-    requireRole(context.role, ADMIN_ROLES, "unlock accounts")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
-    logger.info("profiles", "unlockAccount", { id, unlockedBy: context.userId })
+    logger.info("profiles", "unlockAccount", {
+      id,
+      unlockedBy: context.userId,
+    })
 
     return this.repo.updateAccountStatus(
       id,
@@ -274,29 +284,32 @@ export class ProfilesService {
   // ── Verification ──────────────────────────────────────────────────
 
   async markVerified(id: string, context: ProfileContext): Promise<ProfileRow> {
-    requireRole(context.role, ADMIN_ROLES, "verify profiles")
+    requireRole(context.role as never, [...ADMIN_ROLES])
 
-    logger.info("profiles", "markVerified", { id, verifiedBy: context.userId })
+    logger.info("profiles", "markVerified", {
+      id,
+      verifiedBy: context.userId,
+    })
 
     return this.repo.updateVerification(
       id,
       {
         verification_status: "verified",
-        verification_code_hash: null, // clear code after verification
+        verification_code_hash: null,
         verification_code_expires_at: null,
       },
       context.schoolId
     )
   }
 
-  // ── SIS sync — admin only ─────────────────────────────────────────
+  // ── SIS sync ──────────────────────────────────────────────────────
 
   async syncFromSIS(
     id: string,
     sisId: string,
     context: ProfileContext
   ): Promise<ProfileRow> {
-    requireRole(context.role, SIS_ROLES, "sync profiles from SIS")
+    requireRole(context.role as never, [...SIS_ROLES])
 
     logger.info("profiles", "syncFromSIS", { id, sisId })
 
@@ -304,7 +317,7 @@ export class ProfilesService {
       id,
       {
         sis_id: sisId,
-        sis_last_synced_at: new Date().toISOString(), // ← always server time
+        sis_last_synced_at: new Date().toISOString(),
         sis_sync_status: "synced",
       },
       context.schoolId
