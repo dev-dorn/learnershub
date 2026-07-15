@@ -956,20 +956,26 @@ export type Database = {
       }
       parent_student: {
         Row: {
+          can_pickup_student: boolean | null
           can_receive_notification: boolean | null
           can_view_attendance: boolean | null
           can_view_financial: boolean | null
           can_view_grades: boolean | null
+          can_view_results: boolean | null
           created_at: string | null
           emergency_contact_priority: number | null
+          guardian_name: string | null
+          guardian_phone: string | null
           has_legal_custody: boolean | null
           id: string
           is_primary: boolean | null
+          is_primary_contact: boolean | null
           parent_id: string
           relationship: string
           restricted_access_reason: string | null
           school_id: string
           sis_confirmed: boolean | null
+          sms_notifications: boolean | null
           student_id: string
           updated_at: string | null
           verification_status: string | null
@@ -977,20 +983,26 @@ export type Database = {
           verified_by: string | null
         }
         Insert: {
+          can_pickup_student?: boolean | null
           can_receive_notification?: boolean | null
           can_view_attendance?: boolean | null
           can_view_financial?: boolean | null
           can_view_grades?: boolean | null
+          can_view_results?: boolean | null
           created_at?: string | null
           emergency_contact_priority?: number | null
+          guardian_name?: string | null
+          guardian_phone?: string | null
           has_legal_custody?: boolean | null
           id?: string
           is_primary?: boolean | null
+          is_primary_contact?: boolean | null
           parent_id: string
           relationship: string
           restricted_access_reason?: string | null
           school_id: string
           sis_confirmed?: boolean | null
+          sms_notifications?: boolean | null
           student_id: string
           updated_at?: string | null
           verification_status?: string | null
@@ -998,20 +1010,26 @@ export type Database = {
           verified_by?: string | null
         }
         Update: {
+          can_pickup_student?: boolean | null
           can_receive_notification?: boolean | null
           can_view_attendance?: boolean | null
           can_view_financial?: boolean | null
           can_view_grades?: boolean | null
+          can_view_results?: boolean | null
           created_at?: string | null
           emergency_contact_priority?: number | null
+          guardian_name?: string | null
+          guardian_phone?: string | null
           has_legal_custody?: boolean | null
           id?: string
           is_primary?: boolean | null
+          is_primary_contact?: boolean | null
           parent_id?: string
           relationship?: string
           restricted_access_reason?: string | null
           school_id?: string
           sis_confirmed?: boolean | null
+          sms_notifications?: boolean | null
           student_id?: string
           updated_at?: string | null
           verification_status?: string | null
@@ -1127,10 +1145,12 @@ export type Database = {
           failed_login_attempts: number | null
           full_name: string
           id: string
+          is_superadmin: boolean
           last_login_at: string | null
           locked_until: string | null
           mfa_enabled: boolean | null
           phone: string | null
+          require_password_change: boolean | null
           role: string
           school_id: string | null
           sis_id: string | null
@@ -1148,10 +1168,12 @@ export type Database = {
           failed_login_attempts?: number | null
           full_name: string
           id: string
+          is_superadmin?: boolean
           last_login_at?: string | null
           locked_until?: string | null
           mfa_enabled?: boolean | null
           phone?: string | null
+          require_password_change?: boolean | null
           role: string
           school_id?: string | null
           sis_id?: string | null
@@ -1169,10 +1191,12 @@ export type Database = {
           failed_login_attempts?: number | null
           full_name?: string
           id?: string
+          is_superadmin?: boolean
           last_login_at?: string | null
           locked_until?: string | null
           mfa_enabled?: boolean | null
           phone?: string | null
+          require_password_change?: boolean | null
           role?: string
           school_id?: string | null
           sis_id?: string | null
@@ -1368,46 +1392,97 @@ export type Database = {
         Row: {
           academic_calendar: Json | null
           address: string | null
+          billing_email: string | null
+          billing_phone: string | null
           code: string
+          contact_person: string | null
+          contact_phone: string | null
+          county: string | null
           created_at: string | null
           email: string | null
           id: string
           is_active: boolean | null
+          knec_code: string | null
           logo_url: string | null
+          max_students: number
+          max_teachers: number
+          ministry_code: string | null
           name: string
+          onboarded_at: string | null
+          onboarded_by: string | null
           phone: string | null
+          school_type: string
           settings: Json | null
+          sub_county: string | null
+          subscription_ends_at: string | null
+          subscription_status: string
+          subscription_tier: string
           timezone: string | null
+          trial_ends_at: string | null
           updated_at: string | null
         }
         Insert: {
           academic_calendar?: Json | null
           address?: string | null
+          billing_email?: string | null
+          billing_phone?: string | null
           code: string
+          contact_person?: string | null
+          contact_phone?: string | null
+          county?: string | null
           created_at?: string | null
           email?: string | null
           id?: string
           is_active?: boolean | null
+          knec_code?: string | null
           logo_url?: string | null
+          max_students?: number
+          max_teachers?: number
+          ministry_code?: string | null
           name: string
+          onboarded_at?: string | null
+          onboarded_by?: string | null
           phone?: string | null
+          school_type?: string
           settings?: Json | null
+          sub_county?: string | null
+          subscription_ends_at?: string | null
+          subscription_status?: string
+          subscription_tier?: string
           timezone?: string | null
+          trial_ends_at?: string | null
           updated_at?: string | null
         }
         Update: {
           academic_calendar?: Json | null
           address?: string | null
+          billing_email?: string | null
+          billing_phone?: string | null
           code?: string
+          contact_person?: string | null
+          contact_phone?: string | null
+          county?: string | null
           created_at?: string | null
           email?: string | null
           id?: string
           is_active?: boolean | null
+          knec_code?: string | null
           logo_url?: string | null
+          max_students?: number
+          max_teachers?: number
+          ministry_code?: string | null
           name?: string
+          onboarded_at?: string | null
+          onboarded_by?: string | null
           phone?: string | null
+          school_type?: string
           settings?: Json | null
+          sub_county?: string | null
+          subscription_ends_at?: string | null
+          subscription_status?: string
+          subscription_tier?: string
           timezone?: string | null
+          trial_ends_at?: string | null
           updated_at?: string | null
         }
         Relationships: []
@@ -1594,12 +1669,16 @@ export type Database = {
           parent_verified: boolean | null
           parental_consent_date: string | null
           parental_consent_given: boolean | null
+          pin_last_changed_at: string | null
+          portal_tier: string
           privacy_settings: Json | null
+          require_pin_change: boolean
           requires_parental_consent: boolean | null
           school_id: string
           sis_last_synced_at: string | null
           sis_student_id: string | null
           sis_verified: boolean | null
+          system_email: string | null
           transfer_date: string | null
           updated_at: string | null
           user_id: string
@@ -1617,12 +1696,16 @@ export type Database = {
           parent_verified?: boolean | null
           parental_consent_date?: string | null
           parental_consent_given?: boolean | null
+          pin_last_changed_at?: string | null
+          portal_tier?: string
           privacy_settings?: Json | null
+          require_pin_change?: boolean
           requires_parental_consent?: boolean | null
           school_id: string
           sis_last_synced_at?: string | null
           sis_student_id?: string | null
           sis_verified?: boolean | null
+          system_email?: string | null
           transfer_date?: string | null
           updated_at?: string | null
           user_id: string
@@ -1640,12 +1723,16 @@ export type Database = {
           parent_verified?: boolean | null
           parental_consent_date?: string | null
           parental_consent_given?: boolean | null
+          pin_last_changed_at?: string | null
+          portal_tier?: string
           privacy_settings?: Json | null
+          require_pin_change?: boolean
           requires_parental_consent?: boolean | null
           school_id?: string
           sis_last_synced_at?: string | null
           sis_student_id?: string | null
           sis_verified?: boolean | null
+          system_email?: string | null
           transfer_date?: string | null
           updated_at?: string | null
           user_id?: string
@@ -1710,6 +1797,50 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "fk_subjects_school"
+            columns: ["school_id"]
+            isOneToOne: false
+            referencedRelation: "schools"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      subscription_events: {
+        Row: {
+          created_at: string | null
+          event_type: string
+          from_tier: string | null
+          id: string
+          metadata: Json | null
+          notes: string | null
+          performed_by: string | null
+          school_id: string
+          to_tier: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          event_type: string
+          from_tier?: string | null
+          id?: string
+          metadata?: Json | null
+          notes?: string | null
+          performed_by?: string | null
+          school_id: string
+          to_tier?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          event_type?: string
+          from_tier?: string | null
+          id?: string
+          metadata?: Json | null
+          notes?: string | null
+          performed_by?: string | null
+          school_id?: string
+          to_tier?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "subscription_events_school_id_fkey"
             columns: ["school_id"]
             isOneToOne: false
             referencedRelation: "schools"
@@ -2000,6 +2131,8 @@ export type Database = {
     }
     Functions: {
       auth_has_permission: { Args: { p_permission: string }; Returns: boolean }
+      auth_role: { Args: never; Returns: string }
+      auth_school_id: { Args: never; Returns: string }
       check_account_health: { Args: { p_user_id: string }; Returns: Json }
       cleanup_expired_invitations: {
         Args: { p_school_id?: string }
@@ -2060,6 +2193,8 @@ export type Database = {
         }
         Returns: undefined
       }
+      is_superadmin: { Args: never; Returns: boolean }
+      school_is_active: { Args: { p_school_id: string }; Returns: boolean }
     }
     Enums: {
       user_role: "admin" | "teacher" | "parent" | "student" | "super_admin"
